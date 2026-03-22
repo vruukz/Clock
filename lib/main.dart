@@ -1,14 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'dart:async';
 import 'dart:convert';
 
 // ── NOTIFICATIONS ─────────────────────────────────────────
 final FlutterLocalNotificationsPlugin notifs = FlutterLocalNotificationsPlugin();
+const _alarmChannel = MethodChannel('com.example.clock_app/alarm');
 
 Future<void> initNotifications() async {
   tz.initializeTimeZones();
@@ -20,39 +23,21 @@ Future<void> initNotifications() async {
 
 Future<void> scheduleAlarm(AlarmModel alarm) async {
   if (!alarm.enabled) return;
-  final now = tz.TZDateTime.now(tz.local);
-  var scheduledDate = tz.TZDateTime(
-    tz.local, now.year, now.month, now.day, alarm.hour, alarm.minute,
-  );
-  if (scheduledDate.isBefore(now)) {
-    scheduledDate = scheduledDate.add(const Duration(days: 1));
+  final now = DateTime.now();
+  var alarmTime = DateTime(now.year, now.month, now.day, alarm.hour, alarm.minute);
+  if (alarmTime.isBefore(now)) {
+    alarmTime = alarmTime.add(const Duration(days: 1));
   }
-
-  await notifs.zonedSchedule(
-    id: alarm.id.hashCode,
-    title: alarm.label.isEmpty ? 'Alarm' : alarm.label,
-    body: '${alarm.timeString} — Tap to dismiss',
-    scheduledDate: scheduledDate,
-    notificationDetails: const NotificationDetails(
-      android: AndroidNotificationDetails(
-        'alarm_channel',
-        'Alarms',
-        channelDescription: 'Alarm notifications',
-        importance: Importance.max,
-        priority: Priority.max,
-        fullScreenIntent: true,
-        playSound: true,
-      ),
-    ),
-    androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-    matchDateTimeComponents: alarm.days.any((d) => d)
-      ? DateTimeComponents.dayOfWeekAndTime
-      : null,
-  );
+  await _alarmChannel.invokeMethod('scheduleAlarm', {
+    'id': alarm.id.hashCode,
+    'triggerTime': alarmTime.millisecondsSinceEpoch,
+    'label': alarm.label.isEmpty ? 'Alarm' : alarm.label,
+    'soundPath': alarm.soundPath,
+  });
 }
 
 Future<void> cancelAlarm(String id) async {
-  await notifs.cancel(id: id.hashCode);
+  await _alarmChannel.invokeMethod('cancelAlarm', {'id': id.hashCode});
 }
 
 // ── THEME ─────────────────────────────────────────────────
@@ -62,7 +47,6 @@ const kBorder  = Color(0xFF252525);
 const kText    = Color(0xFFE8E2D9);
 const kMuted   = Color(0xFF666666);
 const kAccent  = Color(0xFFC8F060);
-const kAccent2 = Color(0xFFF0A860);
 const kRed     = Color(0xFFF06060);
 
 // ── MODELS ────────────────────────────────────────────────
@@ -73,6 +57,8 @@ class AlarmModel {
   bool enabled;
   String label;
   List<bool> days;
+  String? soundPath;
+  String? soundName;
 
   AlarmModel({
     required this.id,
@@ -81,6 +67,8 @@ class AlarmModel {
     this.enabled = true,
     this.label = '',
     List<bool>? days,
+    this.soundPath,
+    this.soundName,
   }) : days = days ?? List.filled(7, false);
 
   Map<String, dynamic> toJson() => {
@@ -90,6 +78,8 @@ class AlarmModel {
     'enabled': enabled,
     'label': label,
     'days': days,
+    'soundPath': soundPath,
+    'soundName': soundName,
   };
 
   factory AlarmModel.fromJson(Map<String, dynamic> j) => AlarmModel(
@@ -99,6 +89,8 @@ class AlarmModel {
     enabled: j['enabled'] ?? true,
     label: j['label'] ?? '',
     days: List<bool>.from(j['days'] ?? List.filled(7, false)),
+    soundPath: j['soundPath'],
+    soundName: j['soundName'],
   );
 
   String get timeString =>
@@ -112,6 +104,20 @@ class AlarmModel {
     if (active.length == 7) return 'Every day';
     if (active.length == 5 && !days[5] && !days[6]) return 'Weekdays';
     return active.join(' ');
+  }
+
+  String get ringsInString {
+    final now = DateTime.now();
+    var alarmTime = DateTime(now.year, now.month, now.day, hour, minute);
+    if (alarmTime.isBefore(now)) {
+      alarmTime = alarmTime.add(const Duration(days: 1));
+    }
+    final diff = alarmTime.difference(now);
+    final h = diff.inHours;
+    final m = diff.inMinutes.remainder(60);
+    if (h == 0) return 'Rings in ${m}m';
+    if (m == 0) return 'Rings in ${h}h';
+    return 'Rings in ${h}h ${m}m';
   }
 }
 
@@ -158,9 +164,23 @@ class _ClockHomeState extends State<ClockHome> {
   }
 
   Future<void> _requestPermissions() async {
-    await Permission.notification.request();
+  await Permission.notification.request();
+  final exactAlarm = await Permission.scheduleExactAlarm.status;
+  if (!exactAlarm.isGranted) {
     await Permission.scheduleExactAlarm.request();
   }
+  if (!await Permission.scheduleExactAlarm.isGranted) {
+    await openAppSettings();
+  }
+  
+  // Request battery optimization exemption
+  try {
+    const platform = MethodChannel('com.example.clock_app/alarm');
+    await platform.invokeMethod('requestBatteryOptimization');
+  } catch (e) {
+    // silently fail
+  }
+}
 
   @override
   Widget build(BuildContext context) {
@@ -303,7 +323,10 @@ class _AlarmTabState extends State<AlarmTab> {
   }
 
   void _addAlarm() async {
-    final result = await _showAlarmDialog(null);
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const AlarmEditPage()),
+    );
     if (result != null) {
       setState(() => alarms.add(result));
       await _save();
@@ -312,7 +335,10 @@ class _AlarmTabState extends State<AlarmTab> {
   }
 
   void _editAlarm(AlarmModel alarm) async {
-    final result = await _showAlarmDialog(alarm);
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => AlarmEditPage(alarm: alarm)),
+    );
     if (result != null) {
       setState(() {
         final idx = alarms.indexWhere((a) => a.id == alarm.id);
@@ -338,106 +364,6 @@ class _AlarmTabState extends State<AlarmTab> {
     } else {
       await cancelAlarm(alarms[idx].id);
     }
-  }
-
-  Future<AlarmModel?> _showAlarmDialog(AlarmModel? existing) async {
-    int hour = existing?.hour ?? TimeOfDay.now().hour;
-    int minute = existing?.minute ?? TimeOfDay.now().minute;
-    String label = existing?.label ?? '';
-    List<bool> days = List.from(existing?.days ?? List.filled(7, false));
-    final labelCtrl = TextEditingController(text: label);
-
-    return showDialog<AlarmModel>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setModal) => AlertDialog(
-          backgroundColor: kSurface,
-          title: Text(existing == null ? 'New Alarm' : 'Edit Alarm',
-            style: const TextStyle(color: kText, fontSize: 14)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              GestureDetector(
-                onTap: () async {
-                  final t = await showTimePicker(
-                    context: ctx,
-                    initialTime: TimeOfDay(hour: hour, minute: minute),
-                    builder: (_, child) => Theme(
-                      data: ThemeData.dark().copyWith(
-                        colorScheme: const ColorScheme.dark(
-                          primary: kAccent, surface: kSurface),
-                      ),
-                      child: child!,
-                    ),
-                  );
-                  if (t != null) setModal(() { hour = t.hour; minute = t.minute; });
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  child: Text(
-                    '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}',
-                    style: const TextStyle(
-                      fontSize: 48, color: kAccent, fontFamily: 'monospace'),
-                  ),
-                ),
-              ),
-              TextField(
-                controller: labelCtrl,
-                style: const TextStyle(color: kText, fontSize: 13),
-                decoration: const InputDecoration(
-                  hintText: 'Label (optional)',
-                  hintStyle: TextStyle(color: kMuted),
-                  border: UnderlineInputBorder(
-                    borderSide: BorderSide(color: kBorder)),
-                ),
-                onChanged: (v) => label = v,
-              ),
-              const SizedBox(height: 16),
-              const Text('REPEAT',
-                style: TextStyle(fontSize: 9, color: kMuted, letterSpacing: 3)),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: List.generate(7, (i) {
-                  const names = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-                  return GestureDetector(
-                    onTap: () => setModal(() => days[i] = !days[i]),
-                    child: Container(
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: days[i] ? kAccent : kBorder,
-                      ),
-                      child: Center(child: Text(names[i],
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: days[i] ? kBg : kMuted,
-                        ))),
-                    ),
-                  );
-                }),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel', style: TextStyle(color: kMuted))),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, AlarmModel(
-                id: existing?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
-                hour: hour,
-                minute: minute,
-                label: labelCtrl.text,
-                days: days,
-              )),
-              child: const Text('Save', style: TextStyle(color: kAccent)),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   @override
@@ -482,9 +408,7 @@ class _AlarmTabState extends State<AlarmTab> {
                     decoration: BoxDecoration(
                       color: kSurface,
                       border: Border.all(
-                        color: a.enabled
-                          ? kBorder
-                          : kBorder.withValues(alpha: 0.3)),
+                        color: a.enabled ? kBorder : kBorder.withValues(alpha: 0.3)),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Row(
@@ -510,6 +434,10 @@ class _AlarmTabState extends State<AlarmTab> {
                                 Text(a.daysString,
                                   style: const TextStyle(fontSize: 11, color: kMuted)),
                               ]),
+                              if (a.enabled)
+                                Text(a.ringsInString,
+                                  style: const TextStyle(
+                                    fontSize: 10, color: kAccent, letterSpacing: 1)),
                             ],
                           ),
                         ),
@@ -536,6 +464,374 @@ class _AlarmTabState extends State<AlarmTab> {
               ),
         ),
       ],
+    );
+  }
+}
+
+// ── ALARM EDIT PAGE ───────────────────────────────────────
+class AlarmEditPage extends StatefulWidget {
+  final AlarmModel? alarm;
+  const AlarmEditPage({super.key, this.alarm});
+  @override
+  State<AlarmEditPage> createState() => _AlarmEditPageState();
+}
+
+class _AlarmEditPageState extends State<AlarmEditPage> {
+  late int hour;
+  late int minute;
+  late String label;
+  late List<bool> days;
+  String? soundPath;
+  String? soundName;
+  late TextEditingController labelCtrl;
+  late FixedExtentScrollController _hourCtrl;
+  late FixedExtentScrollController _minCtrl;
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  bool _isPlaying = false;
+
+  @override
+  void initState() {
+    super.initState();
+    hour = widget.alarm?.hour ?? TimeOfDay.now().hour;
+    minute = widget.alarm?.minute ?? TimeOfDay.now().minute;
+    label = widget.alarm?.label ?? '';
+    days = List.from(widget.alarm?.days ?? List.filled(7, false));
+    soundPath = widget.alarm?.soundPath;
+    soundName = widget.alarm?.soundName;
+    labelCtrl = TextEditingController(text: label);
+    _hourCtrl = FixedExtentScrollController(initialItem: hour);
+    _minCtrl = FixedExtentScrollController(initialItem: minute);
+  }
+
+  @override
+  void dispose() {
+    _hourCtrl.dispose();
+    _minCtrl.dispose();
+    labelCtrl.dispose();
+    _audioPlayer.dispose();
+    super.dispose();
+  }
+
+  String get _ringsIn {
+    final now = DateTime.now();
+    var alarmTime = DateTime(now.year, now.month, now.day, hour, minute);
+    if (alarmTime.isBefore(now)) {
+      alarmTime = alarmTime.add(const Duration(days: 1));
+    }
+    final diff = alarmTime.difference(now);
+    final h = diff.inHours;
+    final m = diff.inMinutes.remainder(60);
+    if (h == 0) return 'Rings in ${m}m';
+    if (m == 0) return 'Rings in ${h}h';
+    return 'Rings in ${h}h ${m}m';
+  }
+
+  Future<void> _pickSound() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.audio,
+      allowMultiple: false,
+    );
+    if (result != null && result.files.isNotEmpty) {
+      setState(() {
+        soundPath = result.files.first.path;
+        soundName = result.files.first.name;
+        _isPlaying = false;
+      });
+      await _audioPlayer.stop();
+    }
+  }
+
+  Future<void> _togglePreview() async {
+    if (_isPlaying) {
+      await _audioPlayer.stop();
+      setState(() => _isPlaying = false);
+    } else {
+      if (soundPath != null) {
+        await _audioPlayer.play(DeviceFileSource(soundPath!));
+      } else {
+        // Play default ringtone via platform
+        await _audioPlayer.play(AssetSource('alarm_default.mp3'));
+      }
+      setState(() => _isPlaying = true);
+      _audioPlayer.onPlayerComplete.listen((_) {
+        if (mounted) setState(() => _isPlaying = false);
+      });
+    }
+  }
+
+  AlarmModel get result => AlarmModel(
+    id: widget.alarm?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
+    hour: hour,
+    minute: minute,
+    label: labelCtrl.text,
+    days: days,
+    soundPath: soundPath,
+    soundName: soundName,
+  );
+
+  Widget _scrollPicker(
+    String label,
+    int max,
+    FixedExtentScrollController ctrl,
+    ValueChanged<int> onChanged,
+  ) {
+    return Column(
+      children: [
+        Text(label, style: const TextStyle(
+          fontSize: 9, color: kMuted, letterSpacing: 3)),
+        const SizedBox(height: 8),
+        SizedBox(
+          width: 80,
+          height: 160,
+          child: ListWheelScrollView.useDelegate(
+            controller: ctrl,
+            itemExtent: 52,
+            perspective: 0.002,
+            diameterRatio: 1.4,
+            physics: const FixedExtentScrollPhysics(),
+            onSelectedItemChanged: (i) {
+              HapticFeedback.lightImpact();
+              onChanged(i);
+            },
+            childDelegate: ListWheelChildBuilderDelegate(
+              childCount: max + 1,
+              builder: (_, i) {
+                final selected = i == (label == 'HOUR' ? hour : minute);
+                return Center(
+                  child: Text(
+                    i.toString().padLeft(2, '0'),
+                    style: TextStyle(
+                      fontSize: selected ? 36 : 24,
+                      color: selected ? kAccent : kMuted,
+                      fontFamily: 'monospace',
+                      fontWeight: FontWeight.w200,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: kBg,
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
+              child: Row(
+                children: [
+                  GestureDetector(
+                    onTap: () {
+                      _audioPlayer.stop();
+                      Navigator.pop(context);
+                    },
+                    child: const Icon(Icons.arrow_back, color: kMuted, size: 20),
+                  ),
+                  const SizedBox(width: 16),
+                  const Text('ALARM', style: TextStyle(
+                    fontSize: 11, letterSpacing: 4, color: kAccent)),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: () {
+                      _audioPlayer.stop();
+                      Navigator.pop(context, result);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: kAccent,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text('SAVE', style: TextStyle(
+                        fontSize: 10, color: kBg,
+                        letterSpacing: 2, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Divider(color: kBorder, height: 1),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Time picker
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        _scrollPicker('HOUR', 23, _hourCtrl,
+                          (v) => setState(() => hour = v)),
+                        const Padding(
+                          padding: EdgeInsets.only(top: 24),
+                          child: Text(':', style: TextStyle(
+                            fontSize: 36, color: kMuted, fontFamily: 'monospace')),
+                        ),
+                        _scrollPicker('MIN', 59, _minCtrl,
+                          (v) => setState(() => minute = v)),
+                      ],
+                    ),
+                    Center(
+                      child: Text(_ringsIn, style: const TextStyle(
+                        fontSize: 12, color: kAccent, letterSpacing: 2)),
+                    ),
+                    const SizedBox(height: 24),
+                    const Divider(color: kBorder),
+                    const SizedBox(height: 16),
+
+                    // Label
+                    const Text('LABEL', style: TextStyle(
+                      fontSize: 9, color: kMuted, letterSpacing: 3)),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: labelCtrl,
+                      style: const TextStyle(color: kText, fontSize: 14),
+                      decoration: const InputDecoration(
+                        hintText: 'Alarm label...',
+                        hintStyle: TextStyle(color: kMuted),
+                        border: UnderlineInputBorder(
+                          borderSide: BorderSide(color: kBorder)),
+                        focusedBorder: UnderlineInputBorder(
+                          borderSide: BorderSide(color: kAccent)),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+
+                    // Repeat days
+                    const Text('REPEAT', style: TextStyle(
+                      fontSize: 9, color: kMuted, letterSpacing: 3)),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: List.generate(7, (i) {
+                        const names = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+                        return GestureDetector(
+                          onTap: () {
+                            HapticFeedback.lightImpact();
+                            setState(() => days[i] = !days[i]);
+                          },
+                          child: Container(
+                            width: 36,
+                            height: 36,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: days[i] ? kAccent : kBorder,
+                            ),
+                            child: Center(child: Text(names[i],
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: days[i] ? kBg : kMuted,
+                              ))),
+                          ),
+                        );
+                      }),
+                    ),
+                    const SizedBox(height: 24),
+
+                    // Sound picker
+                    const Text('SOUND', style: TextStyle(
+                      fontSize: 9, color: kMuted, letterSpacing: 3)),
+                    const SizedBox(height: 8),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: kSurface,
+                        border: Border.all(color: kBorder),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Column(
+                        children: [
+                          // Pick sound row
+                          GestureDetector(
+                            onTap: _pickSound,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 14),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.music_note,
+                                    color: kMuted, size: 18),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      soundName ?? 'Default alarm sound',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: soundName != null ? kText : kMuted,
+                                      ),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  const Icon(Icons.chevron_right,
+                                    color: kMuted, size: 18),
+                                ],
+                              ),
+                            ),
+                          ),
+                          // Preview row
+                          const Divider(color: kBorder, height: 1),
+                          GestureDetector(
+                            onTap: _togglePreview,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 12),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    _isPlaying ? Icons.stop : Icons.play_arrow,
+                                    color: _isPlaying ? kRed : kAccent,
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Text(
+                                    _isPlaying ? 'Stop preview' : 'Preview sound',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: _isPlaying ? kRed : kAccent,
+                                      letterSpacing: 1,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (soundName != null) ...[
+                      const SizedBox(height: 8),
+                      GestureDetector(
+                        onTap: () {
+                          _audioPlayer.stop();
+                          setState(() {
+                            soundPath = null;
+                            soundName = null;
+                            _isPlaying = false;
+                          });
+                        },
+                        child: const Text('Use default sound',
+                          style: TextStyle(
+                            fontSize: 11, color: kMuted,
+                            decoration: TextDecoration.underline)),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -587,6 +883,7 @@ class _StopwatchTabState extends State<StopwatchTab> {
             GestureDetector(
               onTap: () {
                 if (_sw.isRunning) {
+                  HapticFeedback.lightImpact();
                   setState(() => _laps.insert(0, _sw.elapsed));
                 } else {
                   setState(() {
@@ -597,8 +894,7 @@ class _StopwatchTabState extends State<StopwatchTab> {
                 }
               },
               child: Container(
-                width: 72,
-                height: 72,
+                width: 72, height: 72,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(color: kBorder, width: 2),
@@ -612,27 +908,25 @@ class _StopwatchTabState extends State<StopwatchTab> {
             ),
             const SizedBox(width: 32),
             GestureDetector(
-              onTap: () => setState(
-                () => _sw.isRunning ? _sw.stop() : _sw.start()),
+              onTap: () {
+                HapticFeedback.mediumImpact();
+                setState(() => _sw.isRunning ? _sw.stop() : _sw.start());
+              },
               child: Container(
-                width: 88,
-                height: 88,
+                width: 88, height: 88,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: _sw.isRunning
                     ? kRed.withValues(alpha: 0.15)
                     : kAccent.withValues(alpha: 0.15),
                   border: Border.all(
-                    color: _sw.isRunning ? kRed : kAccent,
-                    width: 2,
-                  ),
+                    color: _sw.isRunning ? kRed : kAccent, width: 2),
                 ),
                 child: Center(child: Text(
                   _sw.isRunning ? 'STOP' : 'START',
                   style: TextStyle(
                     fontSize: 12, letterSpacing: 1,
-                    color: _sw.isRunning ? kRed : kAccent,
-                  ),
+                    color: _sw.isRunning ? kRed : kAccent),
                 )),
               ),
             ),
@@ -655,8 +949,7 @@ class _StopwatchTabState extends State<StopwatchTab> {
                       vertical: 12, horizontal: 16),
                     decoration: BoxDecoration(
                       border: Border(bottom: BorderSide(
-                        color: kBorder.withValues(alpha: 0.5))),
-                    ),
+                        color: kBorder.withValues(alpha: 0.5)))),
                     child: Row(
                       children: [
                         Text('LAP ${_laps.length - i}',
@@ -698,12 +991,31 @@ class _TimerTabState extends State<TimerTab> {
   int _pickM = 0;
   int _pickS = 0;
 
+  late FixedExtentScrollController _hCtrl;
+  late FixedExtentScrollController _mCtrl;
+  late FixedExtentScrollController _sCtrl;
+
   @override
-  void dispose() { _timer?.cancel(); super.dispose(); }
+  void initState() {
+    super.initState();
+    _hCtrl = FixedExtentScrollController();
+    _mCtrl = FixedExtentScrollController();
+    _sCtrl = FixedExtentScrollController();
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _hCtrl.dispose();
+    _mCtrl.dispose();
+    _sCtrl.dispose();
+    super.dispose();
+  }
 
   void _start() {
     _totalSeconds = _pickH * 3600 + _pickM * 60 + _pickS;
     if (_totalSeconds == 0) return;
+    HapticFeedback.mediumImpact();
     setState(() { _remaining = _totalSeconds; _running = true; _finished = false; });
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       setState(() {
@@ -714,6 +1026,7 @@ class _TimerTabState extends State<TimerTab> {
           _finished = true;
           _timer?.cancel();
           _showTimerNotification();
+          HapticFeedback.heavyImpact();
         }
       });
     });
@@ -723,11 +1036,10 @@ class _TimerTabState extends State<TimerTab> {
     await notifs.show(
       id: 99999,
       title: 'Timer',
-      body: "Your timer has finished!",
+      body: 'Your timer has finished!',
       notificationDetails: const NotificationDetails(
         android: AndroidNotificationDetails(
-          'timer_channel',
-          'Timer',
+          'timer_channel', 'Timer',
           channelDescription: 'Timer notifications',
           importance: Importance.max,
           priority: Priority.max,
@@ -737,9 +1049,14 @@ class _TimerTabState extends State<TimerTab> {
     );
   }
 
-  void _pause() { _timer?.cancel(); setState(() => _running = false); }
+  void _pause() {
+    HapticFeedback.lightImpact();
+    _timer?.cancel();
+    setState(() => _running = false);
+  }
 
   void _resume() {
+    HapticFeedback.lightImpact();
     setState(() { _running = true; _finished = false; });
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       setState(() {
@@ -771,6 +1088,47 @@ class _TimerTabState extends State<TimerTab> {
 
   double get _progress => _totalSeconds > 0 ? _remaining / _totalSeconds : 1.0;
 
+  Widget _picker(String label, int max, FixedExtentScrollController ctrl,
+    int value, ValueChanged<int> onChanged) {
+    return Column(
+      children: [
+        Text(label, style: const TextStyle(
+          fontSize: 9, color: kMuted, letterSpacing: 2)),
+        SizedBox(
+          width: 80, height: 160,
+          child: ListWheelScrollView.useDelegate(
+            controller: ctrl,
+            itemExtent: 52,
+            perspective: 0.002,
+            diameterRatio: 1.4,
+            physics: const FixedExtentScrollPhysics(),
+            onSelectedItemChanged: (i) {
+              HapticFeedback.lightImpact();
+              onChanged(i);
+            },
+            childDelegate: ListWheelChildBuilderDelegate(
+              childCount: max + 1,
+              builder: (_, i) {
+                final selected = i == value;
+                return Center(
+                  child: Text(
+                    i.toString().padLeft(2, '0'),
+                    style: TextStyle(
+                      fontSize: selected ? 36 : 24,
+                      color: selected ? kAccent : kMuted,
+                      fontFamily: 'monospace',
+                      fontWeight: FontWeight.w200,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isSetup = !_running && _remaining == 0 && !_finished;
@@ -785,38 +1143,36 @@ class _TimerTabState extends State<TimerTab> {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              _picker('H', _pickH, 23, (v) => setState(() => _pickH = v)),
-              const Text(':', style: TextStyle(fontSize: 48, color: kMuted)),
-              _picker('M', _pickM, 59, (v) => setState(() => _pickM = v)),
-              const Text(':', style: TextStyle(fontSize: 48, color: kMuted)),
-              _picker('S', _pickS, 59, (v) => setState(() => _pickS = v)),
+              _picker('H', 23, _hCtrl, _pickH, (v) => setState(() => _pickH = v)),
+              const Text(':', style: TextStyle(fontSize: 36, color: kMuted)),
+              _picker('M', 59, _mCtrl, _pickM, (v) => setState(() => _pickM = v)),
+              const Text(':', style: TextStyle(fontSize: 36, color: kMuted)),
+              _picker('S', 59, _sCtrl, _pickS, (v) => setState(() => _pickS = v)),
             ],
           ),
-          const SizedBox(height: 48),
+          const SizedBox(height: 32),
           GestureDetector(
             onTap: _start,
             child: Container(
-              width: 88,
-              height: 88,
+              width: 88, height: 88,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: kAccent.withValues(alpha: 0.15),
                 border: Border.all(color: kAccent, width: 2),
               ),
               child: const Center(child: Text('START',
-                style: TextStyle(fontSize: 12, color: kAccent, letterSpacing: 1))),
+                style: TextStyle(
+                  fontSize: 12, color: kAccent, letterSpacing: 1))),
             ),
           ),
         ] else ...[
           SizedBox(
-            width: 220,
-            height: 220,
+            width: 220, height: 220,
             child: Stack(
               alignment: Alignment.center,
               children: [
                 SizedBox(
-                  width: 220,
-                  height: 220,
+                  width: 220, height: 220,
                   child: CircularProgressIndicator(
                     value: _progress,
                     strokeWidth: 4,
@@ -849,8 +1205,7 @@ class _TimerTabState extends State<TimerTab> {
               GestureDetector(
                 onTap: _reset,
                 child: Container(
-                  width: 72,
-                  height: 72,
+                  width: 72, height: 72,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     border: Border.all(color: kBorder, width: 2),
@@ -864,63 +1219,26 @@ class _TimerTabState extends State<TimerTab> {
               GestureDetector(
                 onTap: _running ? _pause : _resume,
                 child: Container(
-                  width: 88,
-                  height: 88,
+                  width: 88, height: 88,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: _running
                       ? kRed.withValues(alpha: 0.15)
                       : kAccent.withValues(alpha: 0.15),
                     border: Border.all(
-                      color: _running ? kRed : kAccent,
-                      width: 2,
-                    ),
+                      color: _running ? kRed : kAccent, width: 2),
                   ),
                   child: Center(child: Text(
                     _running ? 'PAUSE' : 'RESUME',
                     style: TextStyle(
                       fontSize: 11, letterSpacing: 1,
-                      color: _running ? kRed : kAccent,
-                    ),
+                      color: _running ? kRed : kAccent),
                   )),
                 ),
               ),
             ],
           ),
         ],
-      ],
-    );
-  }
-
-  Widget _picker(String label, int value, int max, ValueChanged<int> onChanged) {
-    return Column(
-      children: [
-        Text(label,
-          style: const TextStyle(fontSize: 9, color: kMuted, letterSpacing: 2)),
-        SizedBox(
-          width: 80,
-          height: 120,
-          child: ListWheelScrollView.useDelegate(
-            itemExtent: 48,
-            perspective: 0.003,
-            diameterRatio: 1.5,
-            onSelectedItemChanged: onChanged,
-            childDelegate: ListWheelChildBuilderDelegate(
-              childCount: max + 1,
-              builder: (_, i) => Center(
-                child: Text(
-                  i.toString().padLeft(2, '0'),
-                  style: TextStyle(
-                    fontSize: 32,
-                    color: i == value ? kAccent : kMuted,
-                    fontFamily: 'monospace',
-                    fontWeight: FontWeight.w200,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
       ],
     );
   }
