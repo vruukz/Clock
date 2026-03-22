@@ -1,17 +1,45 @@
-# clock_app
+# Clock 🕐
 
-A new Flutter project.
+A Flutter clock app for Android with alarm, stopwatch and timer.
 
-## Getting Started
+![Flutter](https://img.shields.io/badge/Flutter-3.41.5-blue)
+![Platform](https://img.shields.io/badge/Platform-Android-green)
 
-This project is a starting point for a Flutter application.
+## Features
 
-A few resources to get you started if this is your first Flutter project:
+- 🕐 Live clock with seconds
+- ⏰ Alarms with repeat days and labels
+- ⏱️ Stopwatch with lap tracking
+- ⌛ Timer with circular progress ring
+- 🔔 Real background notifications for alarms and timer
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+## Setup
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+1. Clone the repo
+2. Install dependencies:
+```bash
+flutter pub get
+```
+3. Run:
+```bash
+flutter run
+```
+
+## Build
+
+**Android APK:**
+```bash
+flutter build apk --release
+```
+
+## Tech Stack
+
+- Flutter / Dart
+- flutter_local_notifications
+- timezone
+- shared_preferences
+- permission_handler
+
+## Version
+
+Current: 1.0.0
