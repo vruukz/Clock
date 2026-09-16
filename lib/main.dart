@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest.dart' as tz;
 import 'package:permission_handler/permission_handler.dart';
@@ -46,8 +47,22 @@ const kSurface = Color(0xFF161616);
 const kBorder  = Color(0xFF252525);
 const kText    = Color(0xFFE8E2D9);
 const kMuted   = Color(0xFF666666);
-const kAccent  = Color(0xFFC8F060);
+const defaultAccent = Color(0xFFC8F060);
+final ValueNotifier<Color> kAccentNotifier = ValueNotifier<Color>(defaultAccent);
+Color get kAccent => kAccentNotifier.value;
 const kRed     = Color(0xFFF06060);
+
+Future<void> loadAccent() async {
+  final prefs = await SharedPreferences.getInstance();
+  final value = prefs.getInt('accent_color');
+  if (value != null) kAccentNotifier.value = Color(value);
+}
+
+Future<void> setAccent(Color color) async {
+  kAccentNotifier.value = color;
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setInt('accent_color', color.value);
+}
 
 // ── MODELS ────────────────────────────────────────────────
 class AlarmModel {
@@ -125,6 +140,7 @@ class AlarmModel {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initNotifications();
+  await loadAccent();
   runApp(const ClockApp());
 }
 
@@ -133,15 +149,18 @@ class ClockApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Clock',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        scaffoldBackgroundColor: kBg,
-        colorScheme: const ColorScheme.dark(primary: kAccent, surface: kSurface),
-        fontFamily: 'monospace',
+    return ValueListenableBuilder<Color>(
+      valueListenable: kAccentNotifier,
+      builder: (context, accent, _) => MaterialApp(
+        title: 'Clock',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(
+          scaffoldBackgroundColor: kBg,
+          colorScheme: ColorScheme.dark(primary: accent, surface: kSurface),
+          fontFamily: 'monospace',
+        ),
+        home: const ClockHome(),
       ),
-      home: const ClockHome(),
     );
   }
 }
@@ -182,6 +201,38 @@ class _ClockHomeState extends State<ClockHome> {
   }
 }
 
+  void _openAccentPicker() {
+    Color pending = kAccent;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: kSurface,
+        title: const Text('Accent color', style: TextStyle(color: kText)),
+        content: SingleChildScrollView(
+          child: ColorPicker(
+            pickerColor: pending,
+            onColorChanged: (color) => pending = color,
+            enableAlpha: false,
+            labelTypes: const [],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              setAccent(pending);
+              Navigator.of(context).pop();
+            },
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -189,6 +240,18 @@ class _ClockHomeState extends State<ClockHome> {
       body: SafeArea(
         child: Column(
           children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  GestureDetector(
+                    onTap: _openAccentPicker,
+                    child: const Icon(Icons.palette_outlined, color: kMuted, size: 18),
+                  ),
+                ],
+              ),
+            ),
             Container(
               decoration: const BoxDecoration(
                 border: Border(bottom: BorderSide(color: kBorder)),
@@ -279,7 +342,7 @@ class _ClockTabState extends State<ClockTab> {
             fontSize: 96, fontWeight: FontWeight.w100, color: kText,
             letterSpacing: -2, fontFamily: 'monospace',
           )),
-          Text(s, style: const TextStyle(
+          Text(s, style: TextStyle(
             fontSize: 32, color: kAccent, fontFamily: 'monospace')),
           const SizedBox(height: 24),
           Text(
@@ -386,7 +449,7 @@ class _AlarmTabState extends State<AlarmTab> {
                     borderRadius: BorderRadius.circular(4),
                     color: kAccent.withValues(alpha: 0.05),
                   ),
-                  child: const Text('+ ALARM',
+                  child: Text('+ ALARM',
                     style: TextStyle(fontSize: 10, color: kAccent, letterSpacing: 2)),
                 ),
               ),
@@ -436,7 +499,7 @@ class _AlarmTabState extends State<AlarmTab> {
                               ]),
                               if (a.enabled)
                                 Text(a.ringsInString,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                     fontSize: 10, color: kAccent, letterSpacing: 1)),
                             ],
                           ),
@@ -635,7 +698,7 @@ class _AlarmEditPageState extends State<AlarmEditPage> {
                     child: const Icon(Icons.arrow_back, color: kMuted, size: 20),
                   ),
                   const SizedBox(width: 16),
-                  const Text('ALARM', style: TextStyle(
+                  Text('ALARM', style: TextStyle(
                     fontSize: 11, letterSpacing: 4, color: kAccent)),
                   const Spacer(),
                   GestureDetector(
@@ -682,7 +745,7 @@ class _AlarmEditPageState extends State<AlarmEditPage> {
                       ],
                     ),
                     Center(
-                      child: Text(_ringsIn, style: const TextStyle(
+                      child: Text(_ringsIn, style: TextStyle(
                         fontSize: 12, color: kAccent, letterSpacing: 2)),
                     ),
                     const SizedBox(height: 24),
@@ -696,10 +759,10 @@ class _AlarmEditPageState extends State<AlarmEditPage> {
                     TextField(
                       controller: labelCtrl,
                       style: const TextStyle(color: kText, fontSize: 14),
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         hintText: 'Alarm label...',
-                        hintStyle: TextStyle(color: kMuted),
-                        border: UnderlineInputBorder(
+                        hintStyle: const TextStyle(color: kMuted),
+                        border: const UnderlineInputBorder(
                           borderSide: BorderSide(color: kBorder)),
                         focusedBorder: UnderlineInputBorder(
                           borderSide: BorderSide(color: kAccent)),
@@ -1160,7 +1223,7 @@ class _TimerTabState extends State<TimerTab> {
                 color: kAccent.withValues(alpha: 0.15),
                 border: Border.all(color: kAccent, width: 2),
               ),
-              child: const Center(child: Text('START',
+              child: Center(child: Text('START',
                 style: TextStyle(
                   fontSize: 12, color: kAccent, letterSpacing: 1))),
             ),
